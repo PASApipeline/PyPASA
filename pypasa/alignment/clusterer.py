@@ -2,20 +2,29 @@
 Alignment clusterer for PyPASA.
 
 This module clusters overlapping transcript alignments based on genomic position.
-Alignments that overlap on the same scaffold (and strand) are grouped into clusters.
+Uses Perl PASA's expanding window algorithm (Overlap_piler.pm) to create maximal
+overlap piles. 
 
-Multiple clustering strategies are supported:
-- Default: Any overlap (even 1 bp)
-- Stringent: Minimum percentage overlap required
-- Gene-based: Cluster by overlap with annotated genes
+By default, matches Perl PASA's default clustering behavior (reassign_clusters_via_valid_align_coords.dbi):
+- Orientation-agnostic: alignments cluster by coordinate overlap only
+- Single-exon alignments (unknown spliced_orient) cluster with any overlapping alignment
+- Mixed-orientation clusters are allowed at this stage
+- Each scaffold is treated as completely distinct (gi|XXX and gi|revXXX are separate)
 
-Corresponds to populate_cdna_clusters.dbi and assign_clusters_by_* in Perl PASA.
+This creates CLUSTERS (first-pass grouping). After assembly, SUBCLUSTERS will be
+created to identify alternative splice variants (≥50% overlap requirement), where
+strand-specificity IS enforced (subcluster_builder.dbi).
+
+Corresponds to:
+- Overlap_piler.pm (cluster creation)
+- reassign_clusters_via_valid_align_coords.dbi (default clustering mode)
+- assign_clusters_by_stringent_alignment_overlap.dbi (optional strand-aware mode)
+- subcluster_builder.dbi (subclustering - implemented after assembly)
 """
 
 import logging
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Tuple
 from collections import defaultdict
-from intervaltree import IntervalTree, Interval
 
 from pypasa.storage.models import Alignment, Orientation
 from pypasa.storage.datastore import DataStore
@@ -25,19 +34,23 @@ logger = logging.getLogger(__name__)
 
 class AlignmentClusterer:
     """
-    Cluster transcript alignments by genomic overlap.
+    Cluster transcript alignments by genomic overlap using expanding window algorithm.
     
-    Clustering strategies:
-    - default: Any overlap triggers clustering
-    - stringent: Minimum percentage overlap required
-    - gene_overlap: Cluster by overlapping gene annotations (future)
+    This implements Perl PASA's Overlap_piler.pm algorithm:
+    1. Sort alignments by left coordinate
+    2. Process left-to-right with expanding window
+    3. If alignment overlaps window: expand window, add to cluster
+    4. If no overlap: close cluster, start new window
+    
+    This creates transitive clusters where alignments may not directly overlap
+    but are connected through intermediate alignments.
     """
     
     def __init__(
         self,
         datastore: DataStore,
         min_overlap_percent: float = 0.0,
-        respect_strand: bool = True,
+        respect_strand: bool = False,
     ):
         """
         Initialize clusterer.
@@ -46,8 +59,11 @@ class AlignmentClusterer:
             datastore: DataStore for querying/updating alignments
             min_overlap_percent: Minimum percentage overlap for clustering (0-100)
                                 If 0, any overlap triggers clustering (default mode)
-                                If >0, requires substantial overlap (stringent mode)
-            respect_strand: If True, only cluster same-strand alignments
+                                Currently not used - reserved for future stringent mode
+            respect_strand: If False (default), orientation-agnostic clustering - matches Perl's
+                           default mode (reassign_clusters_via_valid_align_coords.dbi).
+                           If True, strand-specific clustering - matches Perl's stringent mode
+                           (assign_clusters_by_stringent_alignment_overlap.dbi).
         """
         self.datastore = datastore
         self.min_overlap_percent = min_overlap_percent
@@ -80,12 +96,10 @@ class AlignmentClusterer:
         
         logger.info(f"Clustering alignments on {len(scaffolds)} scaffold(s)")
         
-        # Group scaffolds by normalized name to handle gi|XXX vs gi|revXXX
-        scaffold_groups = self._group_scaffolds_by_normalized_name(scaffolds)
-        logger.info(f"Grouped into {len(scaffold_groups)} normalized scaffold groups")
-        
-        for normalized_name, scaffold_list in scaffold_groups.items():
-            self._cluster_scaffold_group(normalized_name, scaffold_list)
+        # Treat each scaffold independently (matching Perl PASA clustering behavior)
+        # Note: gi|XXX and gi|revXXX are kept separate during clustering
+        for scaffold in scaffolds:
+            self._cluster_scaffold(scaffold)
         
         logger.info(
             f"Clustering complete: {self.stats['clustered_alignments']} alignments "
@@ -94,80 +108,57 @@ class AlignmentClusterer:
         
         return self.stats
     
-    def _group_scaffolds_by_normalized_name(self, scaffolds: List[str]) -> Dict[str, List[str]]:
+    def _cluster_scaffold(self, scaffold: str) -> None:
         """
-        Group scaffolds by normalized name to handle gi|XXX vs gi|revXXX.
+        Cluster all valid alignments on a single scaffold.
         
-        This ensures that alignments on both forward and reverse versions
-        of the same scaffold are clustered together (matching Perl PASA behavior).
+        Uses expanding window algorithm (Perl's Overlap_piler.pm) to create
+        maximal overlap piles.
         
         Args:
-            scaffolds: List of scaffold names
-            
-        Returns:
-            Dictionary mapping normalized_name -> [list of scaffold variants]
+            scaffold: Scaffold name (treated as distinct - gi|XXX and gi|revXXX are separate)
         """
-        from collections import defaultdict
-        groups = defaultdict(list)
-        
-        for scaffold in scaffolds:
-            # Normalize: gi|revXXX -> gi|XXX
-            normalized = scaffold.replace("|rev", "|", 1) if scaffold.startswith("gi|rev") else scaffold
-            groups[normalized].append(scaffold)
-        
-        return dict(groups)
-    
-    def _cluster_scaffold_group(self, normalized_name: str, scaffold_list: List[str]) -> None:
-        """
-        Cluster all valid alignments across a group of scaffold variants.
-        
-        This handles cases where the same transcript aligns to both gi|XXX and gi|revXXX,
-        ensuring they are clustered together as they represent the same physical location.
-        
-        Args:
-            normalized_name: Normalized scaffold name
-            scaffold_list: List of scaffold variants (e.g., ['gi|68713', 'gi|rev68713'])
-        """
-        # Load alignments from ALL scaffold variants
-        all_alignments = []
-        for scaffold in scaffold_list:
-            alignments = self.datastore.get_alignments_by_scaffold(scaffold, valid_only=True)
-            all_alignments.extend(alignments)
+        # Load alignments from this scaffold only
+        all_alignments = self.datastore.get_alignments_by_scaffold(scaffold, valid_only=True)
         
         if not all_alignments:
             return
         
-        if len(scaffold_list) > 1:
-            logger.debug(
-                f"Clustering {len(all_alignments)} alignments across "
-                f"{len(scaffold_list)} scaffold variants: {scaffold_list}"
-            )
-        else:
-            logger.debug(f"Clustering {len(all_alignments)} alignments on {scaffold_list[0]}")
+        logger.debug(f"Clustering {len(all_alignments)} alignments on {scaffold}")
         
         self.stats['total_alignments'] += len(all_alignments)
         
-        # Build interval trees for fast overlap detection
         # Separate by strand if respect_strand is True
         if self.respect_strand:
-            trees = self._build_strand_specific_trees(all_alignments)
+            # Group by effective orientation (transcribed orientation with fallback to aligned)
+            # This matches Perl PASA's behavior where clustering uses spliced_orient when available
+            by_strand = defaultdict(list)
+            for aln in all_alignments:
+                by_strand[aln.effective_orient].append(aln)
+            
+            cluster_assignments = {}
+            for strand, strand_alignments in by_strand.items():
+                strand_clusters = self._expanding_window_cluster(strand_alignments)
+                
+                # Assign cluster IDs
+                for cluster_members in strand_clusters:
+                    cluster_id = self.next_cluster_id
+                    self.next_cluster_id += 1
+                    
+                    for align_id in cluster_members:
+                        cluster_assignments[align_id] = cluster_id
+                    
+                    # Update stats
+                    self.stats['total_clusters'] += 1
+                    if len(cluster_members) == 1:
+                        self.stats['singleton_clusters'] += 1
+                    else:
+                        self.stats['multi_alignment_clusters'] += 1
         else:
-            trees = {None: self._build_interval_tree(all_alignments)}
-        
-        # Find connected components (clusters)
-        cluster_assignments = {}
-        
-        for strand, tree in trees.items():
-            # Get alignments for this strand
-            if strand is not None:
-                strand_alignments = [a for a in all_alignments if a.orient == strand]
-            else:
-                strand_alignments = all_alignments
+            # Don't separate by strand
+            clusters = self._expanding_window_cluster(all_alignments)
             
-            # Find overlapping groups using union-find
-            clusters = self._find_overlap_clusters(strand_alignments)
-            
-            # Assign cluster IDs
+            cluster_assignments = {}
             for cluster_members in clusters:
                 cluster_id = self.next_cluster_id
                 self.next_cluster_id += 1
@@ -189,134 +180,67 @@ class AlignmentClusterer:
             self.datastore.update_alignment_clusters(cluster_assignments)
             logger.debug(
                 f"Assigned {len(cluster_assignments)} alignments to "
-                f"{len(set(cluster_assignments.values()))} clusters on {scaffold}"
+                f"{len(set(cluster_assignments.values()))} clusters"
             )
     
-    def _build_interval_tree(self, alignments: List[Alignment]) -> IntervalTree:
+    def _expanding_window_cluster(self, alignments: List[Alignment]) -> List[List[int]]:
         """
-        Build an interval tree for fast overlap queries.
+        Cluster alignments using expanding window algorithm (Perl's Overlap_piler.pm).
+        
+        Algorithm:
+        1. Sort alignments by left coordinate (genome_lend)
+        2. Initialize window with first alignment
+        3. For each subsequent alignment:
+           - If it overlaps the current window: expand window, add to cluster
+           - Else: close current cluster, start new window
+        
+        This creates transitive clusters where alignments may not directly overlap
+        but are connected through intermediate alignments.
         
         Args:
-            alignments: List of alignments
+            alignments: List of alignments to cluster (same scaffold/strand)
             
         Returns:
-            IntervalTree with alignment IDs as data
+            List of clusters, where each cluster is a list of align_ids
         """
-        tree = IntervalTree()
+        if not alignments:
+            return []
         
-        for alignment in alignments:
-            # Add interval with alignment ID as data
-            tree.addi(alignment.genome_lend, alignment.genome_rend + 1, alignment.align_id)
+        # Sort by left coordinate
+        sorted_alns = sorted(alignments, key=lambda a: a.genome_lend)
         
-        return tree
-    
-    def _build_strand_specific_trees(
-        self, alignments: List[Alignment]
-    ) -> Dict[Orientation, IntervalTree]:
-        """
-        Build separate interval trees for each strand.
+        clusters = []
+        current_cluster = [sorted_alns[0].align_id]
         
-        Args:
-            alignments: List of alignments
+        # Initialize window with first alignment coordinates
+        window_left = sorted_alns[0].genome_lend
+        window_right = sorted_alns[0].genome_rend
+        
+        # Process remaining alignments
+        for i in range(1, len(sorted_alns)):
+            aln = sorted_alns[i]
+            lend = aln.genome_lend
+            rend = aln.genome_rend
             
-        Returns:
-            Dictionary mapping Orientation -> IntervalTree
-        """
-        trees = {
-            Orientation.PLUS: IntervalTree(),
-            Orientation.MINUS: IntervalTree(),
-            Orientation.UNKNOWN: IntervalTree(),
-        }
+            # Check if alignment overlaps current window
+            if window_left <= rend and window_right >= lend:
+                # Overlap - expand window and add to current cluster
+                window_left = min(window_left, lend)
+                window_right = max(window_right, rend)
+                current_cluster.append(aln.align_id)
+            else:
+                # No overlap - close current cluster and start new one
+                clusters.append(current_cluster)
+                
+                # Start new cluster
+                current_cluster = [aln.align_id]
+                window_left = lend
+                window_right = rend
         
-        for alignment in alignments:
-            tree = trees[alignment.orient]
-            tree.addi(alignment.genome_lend, alignment.genome_rend + 1, alignment.align_id)
+        # Don't forget the final cluster
+        clusters.append(current_cluster)
         
-        return trees
-    
-    def _find_overlap_clusters(self, alignments: List[Alignment]) -> List[Set[int]]:
-        """
-        Find clusters of overlapping alignments using union-find.
-        
-        Args:
-            alignments: List of alignments to cluster
-            
-        Returns:
-            List of sets, each set containing align_ids that form a cluster
-        """
-        # Build parent mapping for union-find
-        parent = {a.align_id: a.align_id for a in alignments}
-        
-        def find(x):
-            """Find root of x with path compression."""
-            if parent[x] != x:
-                parent[x] = find(parent[x])
-            return parent[x]
-        
-        def union(x, y):
-            """Union two sets."""
-            root_x = find(x)
-            root_y = find(y)
-            if root_x != root_y:
-                parent[root_x] = root_y
-        
-        # Check each pair of alignments for overlap
-        alignment_dict = {a.align_id: a for a in alignments}
-        
-        for i, aln1 in enumerate(alignments):
-            for aln2 in alignments[i + 1:]:
-                if self._should_cluster(aln1, aln2):
-                    union(aln1.align_id, aln2.align_id)
-        
-        # Group alignments by root
-        clusters = defaultdict(set)
-        for align_id in parent:
-            root = find(align_id)
-            clusters[root].add(align_id)
-        
-        return list(clusters.values())
-    
-    def _should_cluster(self, aln1: Alignment, aln2: Alignment) -> bool:
-        """
-        Determine if two alignments should be clustered together.
-        
-        Args:
-            aln1: First alignment
-            aln2: Second alignment
-            
-        Returns:
-            True if alignments should be clustered
-        """
-        # Must be on same scaffold
-        if aln1.scaffold != aln2.scaffold:
-            return False
-        
-        # Check strand if required
-        if self.respect_strand:
-            # Skip if both have known strands that differ
-            if (aln1.orient != Orientation.UNKNOWN and 
-                aln2.orient != Orientation.UNKNOWN and
-                aln1.orient != aln2.orient):
-                return False
-        
-        # Calculate overlap
-        overlap_start = max(aln1.genome_lend, aln2.genome_lend)
-        overlap_end = min(aln1.genome_rend, aln2.genome_rend)
-        overlap = overlap_end - overlap_start + 1
-        
-        if overlap < 1:
-            return False  # No overlap
-        
-        # Check minimum overlap percentage if required
-        if self.min_overlap_percent > 0:
-            # Calculate overlap as percentage of shorter alignment
-            min_length = min(aln1.genome_span, aln2.genome_span)
-            overlap_percent = (overlap / min_length) * 100.0
-            
-            if overlap_percent < self.min_overlap_percent:
-                return False
-        
-        return True
+        return clusters
     
     def get_clustering_report(self) -> str:
         """
@@ -325,31 +249,35 @@ class AlignmentClusterer:
         Returns:
             Formatted report string
         """
-        total_aligns = self.stats['total_alignments']
-        total_clusters = self.stats['total_clusters']
-        
-        if total_aligns == 0:
-            return "No alignments clustered"
-        
         report = []
         report.append("=" * 60)
         report.append("ALIGNMENT CLUSTERING REPORT")
         report.append("=" * 60)
-        report.append(f"Total alignments:        {total_aligns:>10,}")
-        report.append(f"Clustered alignments:    {self.stats['clustered_alignments']:>10,}")
-        report.append(f"Total clusters:          {total_clusters:>10,}")
+        
+        total = self.stats['total_alignments']
+        clustered = self.stats['clustered_alignments']
+        clusters = self.stats['total_clusters']
+        singletons = self.stats['singleton_clusters']
+        multi = self.stats['multi_alignment_clusters']
+        
+        report.append(f"Total alignments:            {total:>10,}")
+        report.append(f"Clustered alignments:        {clustered:>10,}")
+        report.append(f"Total clusters:               {clusters:>10,}")
         report.append("")
         report.append("Cluster composition:")
-        report.append(f"  Singleton clusters:    {self.stats['singleton_clusters']:>10,} ({100.0 * self.stats['singleton_clusters'] / total_clusters:>6.2f}%)")
-        report.append(f"  Multi-alignment:       {self.stats['multi_alignment_clusters']:>10,} ({100.0 * self.stats['multi_alignment_clusters'] / total_clusters:>6.2f}%)")
-        report.append("")
-        
-        if self.min_overlap_percent > 0:
-            report.append(f"Clustering mode: Stringent (min {self.min_overlap_percent}% overlap)")
+        if clusters > 0:
+            report.append(f"  Singleton clusters:             {singletons:>5,} ({singletons/clusters*100:>6.2f}%)")
+            report.append(f"  Multi-alignment:            {multi:>5,} ({multi/clusters*100:>6.2f}%)")
         else:
-            report.append("Clustering mode: Default (any overlap)")
-        
+            report.append("  Singleton clusters:                 0")
+            report.append("  Multi-alignment:                0")
+        report.append("")
+        report.append("Clustering algorithm: Expanding window (Perl's Overlap_piler.pm)")
         report.append(f"Strand-specific: {self.respect_strand}")
+        report.append("")
+        report.append("Note: This creates CLUSTERS (first-pass grouping).")
+        report.append("      SUBCLUSTERS (alternative splice variants) will be")
+        report.append("      created after assembly step (future implementation).")
         report.append("=" * 60)
         
         return "\n".join(report)

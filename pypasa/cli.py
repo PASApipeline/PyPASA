@@ -13,7 +13,6 @@ from pathlib import Path
 from pypasa.storage.datastore import DataStore
 from pypasa.alignment.importer import GFF3AlignmentImporter
 from pypasa.alignment.validator import AlignmentValidator
-from pypasa.alignment.best_selector import select_best_alignments, get_selection_report
 from pypasa.alignment.clusterer import AlignmentClusterer
 from pypasa.assembly.assembler import PASAAssembler
 
@@ -98,17 +97,18 @@ def align_assemble(
             datastore,
             min_percent_id=min_percent_id,
             min_percent_aligned=min_percent_aligned,
+            genome_fasta=genome,
+            transcript_fasta=transcripts,
         )
         val_stats = validator.validate_alignments()
         logger.info(f"  {val_stats['passed']}/{val_stats['total']} alignments passed validation")
         
-        # Step 3: Select best alignments (match Perl PASA behavior)
-        logger.info("Step 3/5: Selecting best alignment per cDNA per scaffold")
-        best_stats = select_best_alignments(datastore, score_method="weighted")
-        logger.info(f"  Kept {best_stats['kept']:,} best alignments, discarded {best_stats['discarded']:,}")
-        
-        # Step 4: Cluster alignments
-        logger.info("Step 4/5: Clustering alignments")
+        # Step 3: Cluster alignments
+        # NOTE: Following Perl PASA workflow - cluster ALL valid alignments.
+        # A cDNA can have multiple alignments in different clusters.
+        # No pre-clustering selection is performed (matches Perl PASA's actual behavior).
+        logger.info("Step 3/4: Clustering alignments")
+        logger.info("  (Allowing multiple alignments per cDNA - matching Perl PASA)")
         clusterer = AlignmentClusterer(
             datastore,
             min_overlap_percent=min_overlap_percent,
@@ -116,8 +116,8 @@ def align_assemble(
         clust_stats = clusterer.cluster_alignments()
         logger.info(f"  Created {clust_stats['total_clusters']} clusters")
         
-        # Step 5: Assemble clusters
-        logger.info("Step 5/5: Assembling clusters")
+        # Step 4: Assemble clusters
+        logger.info("Step 4/4: Assembling clusters")
         if pasa_home:
             assembler = PASAAssembler(datastore, pasa_home, genome)
             asm_stats = assembler.assemble_all_clusters(output_dir=output_dir)

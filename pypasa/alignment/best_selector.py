@@ -2,7 +2,8 @@
 Best alignment selection module.
 
 This module implements the best-alignment selection logic to match Perl PASA behavior.
-For each cDNA transcript, only the single best alignment per scaffold is retained.
+For each cDNA transcript, only the single best alignment globally is retained.
+All scaffolds (including gi|XXX and gi|revXXX) are treated as completely distinct.
 """
 
 import logging
@@ -13,25 +14,6 @@ from ..storage.datastore import DataStore
 from ..storage.models import Alignment
 
 logger = logging.getLogger(__name__)
-
-
-def _normalize_scaffold_name(scaffold: str) -> str:
-    """
-    Normalize scaffold name to handle reverse-complement naming.
-    
-    Perl PASA treats 'gi|XXX' and 'gi|revXXX' as the same scaffold.
-    This function strips the 'rev' prefix to normalize them.
-    
-    Args:
-        scaffold: Original scaffold name
-        
-    Returns:
-        Normalized scaffold name
-    """
-    if scaffold.startswith("gi|rev"):
-        # Strip 'rev' to normalize: gi|rev68713 -> gi|68713
-        return scaffold.replace("|rev", "|", 1)
-    return scaffold
 
 
 def select_best_alignments(
@@ -98,9 +80,9 @@ def select_best_alignments(
         # Multiple alignments - need to select the SINGLE best
         stats['cdnas_with_multiple'] += 1
         # This happens when:
-        # 1. Same cDNA aligns to multiple scaffolds
+        # 1. Same cDNA aligns to multiple scaffolds (treated as distinct)
         # 2. Same cDNA aligns to multiple locations on same scaffold
-        # 3. Same cDNA aligns to gi|XXX and gi|revXXX (forward/reverse)
+        # 3. Same cDNA aligns to both gi|XXX and gi|revXXX (treated as distinct scaffolds)
         
         # Calculate scores
         scored_alignments = []

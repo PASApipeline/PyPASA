@@ -104,6 +104,19 @@ class Alignment:
         return max(s.genome_rend for s in self.segments)
     
     @property
+    def effective_orient(self) -> Orientation:
+        """
+        Get the effective orientation for clustering/assembly.
+        
+        Uses spliced_orient (transcribed orientation from splice sites) if available,
+        otherwise falls back to aligned orient.
+        
+        This matches Perl PASA's force_flexorient behavior where alignments are
+        grouped by transcribed orientation, not aligned orientation.
+        """
+        return self.spliced_orient if self.spliced_orient else self.orient
+    
+    @property
     def genome_span(self) -> int:
         """Span on genome (including introns)."""
         return self.genome_rend - self.genome_lend + 1
@@ -115,8 +128,8 @@ class Alignment:
     
     @property
     def aligned_length(self) -> int:
-        """Total aligned length (sum of exons)."""
-        return sum(s.genome_length for s in self.segments)
+        """Total aligned length (sum of exons on transcript, not genome)."""
+        return sum(s.transcript_length for s in self.segments)
     
     def overlaps(self, other: "Alignment", min_overlap: int = 1) -> bool:
         """

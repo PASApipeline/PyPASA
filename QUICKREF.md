@@ -1,5 +1,11 @@
 # PyPASA - Quick Reference
 
+> **⚠️ Critical Notes for Developers/AI**:
+> - **Scaffolds**: NEVER normalize, group, or merge scaffold names. `gi|68711` ≠ `gi|rev68711`
+> - **Clustering**: Default is orientation-agnostic (`respect_strand=False`)
+> - **Validation**: Always test against Perl PASA output in `/tmp/sample_mydb_pasa.sqlite`
+> - See [ARCHITECTURE.md](ARCHITECTURE.md#critical-design-rules) for details
+
 ## Installation
 
 ```bash

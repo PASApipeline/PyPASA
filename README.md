@@ -1,5 +1,7 @@
 # PyPASA - Python Implementation of PASA Alignment Assembly Pipeline
 
+> **📋 Developer Note**: See [ARCHITECTURE.md](ARCHITECTURE.md#critical-design-rules) for critical design rules, especially regarding scaffold handling and clustering behavior.
+
 ## Overview
 
 PyPASA is a Python port of the PASA (Program to Assemble Spliced Alignments) alignment assembly pipeline. This implementation focuses on the core alignment assembly functionality while maintaining compatibility with the original PASA workflow.

@@ -309,6 +309,66 @@ class DataStore:
         
         logger.info(f"Updated validity for {len(validity)} alignments")
     
+    def update_percent_aligned(self, percent_aligned: Dict[int, float]) -> None:
+        """
+        Update percent_aligned values for alignments.
+        
+        Args:
+            percent_aligned: Mapping of align_id -> percent_aligned
+        """
+        if not percent_aligned:
+            return
+        
+        with self.transaction() as cursor:
+            # Update the percent_aligned column
+            cursor.executemany(
+                "UPDATE alignments SET percent_aligned = ? WHERE align_id = ?",
+                [(pct, align_id) for align_id, pct in percent_aligned.items()],
+            )
+            
+            # Also update the JSON data to keep it in sync
+            for align_id, pct in percent_aligned.items():
+                cursor.execute(
+                    """
+                    UPDATE alignments 
+                    SET alignment_data = json_set(alignment_data, '$.percent_aligned', ?)
+                    WHERE align_id = ?
+                    """,
+                    (pct, align_id),
+                )
+        
+        logger.debug(f"Updated percent_aligned for {len(percent_aligned)} alignments")
+    
+    def update_spliced_orientations(self, orientations: Dict[int, 'Orientation']) -> None:
+        """
+        Update spliced orientation (transcribed orientation) for alignments.
+        
+        Args:
+            orientations: Mapping of align_id -> Orientation
+        """
+        if not orientations:
+            return
+        
+        with self.transaction() as cursor:
+            # Update the spliced_orient column
+            cursor.executemany(
+                "UPDATE alignments SET spliced_orient = ? WHERE align_id = ?",
+                [(orient.value, align_id) for align_id, orient in orientations.items()],
+            )
+            
+            # Also update the JSON data to keep it in sync
+            for align_id, orient in orientations.items():
+                cursor.execute(
+                    """
+                    UPDATE alignments 
+                    SET alignment_data = json_set(alignment_data, '$.spliced_orient', ?)
+                    WHERE align_id = ?
+                    """,
+                    (orient.value, align_id),
+                )
+        
+        logger.info(f"Updated spliced orientation for {len(orientations)} alignments")
+    
     def invalidate_alignments(self, align_ids: List[int]) -> None:
         """
         Mark alignments as invalid (used for best-alignment selection).

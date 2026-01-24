@@ -16,7 +16,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from pypasa.storage.datastore import DataStore
 from pypasa.alignment.importer import GFF3AlignmentImporter
 from pypasa.alignment.validator import AlignmentValidator
-from pypasa.alignment.best_selector import select_best_alignments, get_selection_report
 from pypasa.alignment.clusterer import AlignmentClusterer
 from pypasa.assembly.assembler import PASAAssembler
 
@@ -37,7 +36,8 @@ def main():
     
     # Input files
     alignments_gff3 = sample_data / "custom_alignments.gff3"
-    genome_fasta = sample_data / "genome_sample.fasta.gz"
+    genome_fasta = sample_data / "genome_sample.fasta"  # Use uncompressed version
+    transcript_fasta = sample_data / "all_transcripts.fasta"
     
     # Output
     output_dir = base_dir / "test_output"
@@ -50,6 +50,7 @@ def main():
     logger.info("=" * 70)
     logger.info(f"Alignments: {alignments_gff3}")
     logger.info(f"Genome: {genome_fasta}")
+    logger.info(f"Transcripts: {transcript_fasta}")
     logger.info(f"Database: {database}")
     logger.info(f"Output: {output_dir}")
     logger.info("")
@@ -71,17 +72,18 @@ def main():
             datastore,
             min_percent_id=95.0,  # Match Perl PASA config
             min_percent_aligned=75.0,  # Match Perl PASA config
+            genome_fasta=str(genome_fasta),  # For splice orientation detection
+            transcript_fasta=str(transcript_fasta),  # For correct percent_aligned calculation
         )
         val_stats = validator.validate_alignments()
         logger.info(f"✓ Validated alignments: {val_stats['passed']:,}/{val_stats['total']:,} passed")
         
-        # Step 3: Select SINGLE best alignment per cDNA (matching Perl PASA -N 1)
-        logger.info("\nStep 3/4: Selecting best alignment per cDNA (globally)")
-        best_stats = select_best_alignments(datastore, score_method="weighted")
-        logger.info(f"✓ Kept {best_stats['kept']:,} best alignments, discarded {best_stats['discarded']:,}")
-        
-        # Step 4: Cluster alignments
-        logger.info("\nStep 4/4: Clustering alignments")
+        # Step 3: Cluster alignments
+        # NOTE: Following Perl PASA workflow - cluster ALL valid alignments.
+        # A cDNA can have multiple alignments in different clusters.
+        # No pre-clustering selection is performed (matches Perl PASA's actual behavior).
+        logger.info("\nStep 3/3: Clustering alignments")
+        logger.info("(Allowing multiple alignments per cDNA - matching Perl PASA)")
         clusterer = AlignmentClusterer(
             datastore,
             min_overlap_percent=0.0,  # Default mode
@@ -95,7 +97,6 @@ def main():
         print("=" * 70)
         
         print("\n" + validator.get_validation_report())
-        print("\n" + get_selection_report(best_stats))
         print("\n" + clusterer.get_clustering_report())
         
         # Database stats
