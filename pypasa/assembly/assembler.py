@@ -19,7 +19,8 @@ from pypasa.assembly.backend import AssemblerBackend
 from pypasa.assembly.cluster_assembler import (
     AssembledTranscript,
     ClusterAlignment,
-    assemble_cluster,
+    select_assemblies,
+    strand_passes,
 )
 from pypasa.models import Alignment, AlignmentSegment, Assembly, Orientation
 
@@ -99,8 +100,10 @@ class PASAAssembler:
         """
         Args:
             backend: the assembler backend
-            workers: clusters assembled concurrently. Threads suffice because
-                the pasa_cpp backend's time is spent in subprocesses.
+            workers: the clusters are split into this many contiguous chunks,
+                each sent to the backend as one assemble_many() call, run
+                concurrently. Threads suffice because the pasa_cpp backend's
+                time is spent in subprocesses.
         """
         self.backend = backend
         self.workers = workers
@@ -126,13 +129,26 @@ class PASAAssembler:
                     )
                 jobs.append((scaffold, cluster_id, [to_cluster_alignment(a) for a in members]))
 
+        chunk_size = -(-len(jobs) // self.workers) if jobs else 1
+        chunks = [jobs[i:i + chunk_size] for i in range(0, len(jobs), chunk_size)]
+
+        def run_chunk(chunk):
+            passes = [p for _, _, members in chunk for p in strand_passes(members)]
+            raw = self.backend.assemble_many(passes)
+            # each cluster has a '+' then a '-' pass
+            return [
+                select_assemblies(members, raw[2 * i] + raw[2 * i + 1])
+                for i, (_, _, members) in enumerate(chunk)
+            ]
+
         with ThreadPoolExecutor(max_workers=self.workers) as pool:
-            results = pool.map(lambda job: assemble_cluster(job[2], self.backend), jobs)
-            # map() yields in job order, so assembly ids are the same for any worker count
-            assemblies = []
-            for (scaffold, cluster_id, _), transcripts in zip(jobs, results):
-                assemblies.extend(self._to_assembly(t, cluster_id, scaffold) for t in transcripts)
-                self.stats["clusters_processed"] += 1
+            # map() yields in chunk order, so assembly ids are the same for any worker count
+            results = [t for chunk_result in pool.map(run_chunk, chunks) for t in chunk_result]
+
+        assemblies = []
+        for (scaffold, cluster_id, _), transcripts in zip(jobs, results):
+            assemblies.extend(self._to_assembly(t, cluster_id, scaffold) for t in transcripts)
+            self.stats["clusters_processed"] += 1
 
         self.stats["assemblies_generated"] = len(assemblies)
         logger.info(

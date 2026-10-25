@@ -5,6 +5,10 @@ Mirrors pasa_cpp_assemblies() in PerlLib/CDNA/PASA_alignment_assembler.pm:
 write one alignment per line as `acc,orient,lend-rend,...`, run the binary,
 and parse its `assembly: (N) contains alignments: [...] with structure [...]`
 lines.
+
+pasa builds with batch mode (-B) take many strand passes in one run, with
+records separated by `//` lines; assemble_many() uses it when the binary
+supports it, which avoids starting a process per pass.
 """
 
 import os
@@ -70,16 +74,22 @@ class PasaCppBackend(AssemblerBackend):
             )
         self.pasa_bin = str(resolved)
         self.tmpdir = tmpdir
+        self.supports_batch = self._supports_batch()
 
-    def assemble(self, inputs: Sequence[AssemblyInput]) -> List[RawAssembly]:
+    def _supports_batch(self) -> bool:
+        # An older pasa given '//' lines would loop forever, so check its usage text.
+        usage = subprocess.run([self.pasa_bin], capture_output=True, text=True).stderr
+        return "-B batch mode" in usage
+
+    def _run(self, text: str, extra_args: List[str]) -> str:
         with tempfile.NamedTemporaryFile(
             mode="w", prefix="pasa.", suffix=".in", dir=self.tmpdir, delete=False
         ) as fh:
-            fh.write(format_pasa_input(inputs))
+            fh.write(text)
             input_path = fh.name
         try:
             result = subprocess.run(
-                [self.pasa_bin, input_path], capture_output=True, text=True
+                [self.pasa_bin, input_path] + extra_args, capture_output=True, text=True
             )
             if result.returncode != 0:
                 killer = Path(input_path).with_name("pasa_killer.input")
@@ -87,6 +97,20 @@ class PasaCppBackend(AssemblerBackend):
                 raise RuntimeError(
                     f"pasa exited {result.returncode}; input saved to {killer}\n{result.stderr}"
                 )
-            return parse_pasa_output(result.stdout)
+            return result.stdout
         finally:
             os.unlink(input_path)
+
+    def assemble(self, inputs: Sequence[AssemblyInput]) -> List[RawAssembly]:
+        return parse_pasa_output(self._run(format_pasa_input(inputs), []))
+
+    def assemble_many(self, batches: Sequence[Sequence[AssemblyInput]]) -> List[List[RawAssembly]]:
+        if not self.supports_batch:
+            return super().assemble_many(batches)
+        if any(len(b) == 0 for b in batches):
+            raise ValueError("empty strand pass")
+        text = "//\n".join(format_pasa_input(b) for b in batches)
+        records = re.split(r"^//\n", self._run(text, ["-B"]), flags=re.M)[1:]
+        if len(records) != len(batches):
+            raise RuntimeError(f"pasa -B returned {len(records)} records for {len(batches)} inputs")
+        return [parse_pasa_output(r) for r in records]

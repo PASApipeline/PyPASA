@@ -5,12 +5,14 @@ Port of assemble_alignments() and force_flexorient() in
 PerlLib/CDNA/PASA_alignment_assembler.pm:
 
 1. Sort alignments by lend (stable, so input order breaks ties).
-2. Run the backend twice: once with unoriented ('?' spliced_orient) alignments
+2. Run the backend twice (strand_passes): once with unoriented ('?' spliced_orient) alignments
    forced to '+', once forced to '-'. Alignments with a spliced orientation
    keep it in both passes.
 3. Order all assemblies ('+' pass first, then '-') by number of contained
    alignments, descending; ties keep reverse input order, matching Perl's
    `reverse sort {...}` over a stable sort.
+   Steps 3-5 are select_assemblies(), so many clusters' passes can be sent to
+   the backend in one batch (assembler.py).
 4. Greedily report each assembly that contains at least one accession not yet
    covered, stopping once every accession is covered.
 5. Set each reported assembly's spliced orientation from its members, its
@@ -67,25 +69,35 @@ def force_flexorient(alignments: Sequence[ClusterAlignment], orient: str) -> Lis
     ]
 
 
+def strand_passes(alignments: Sequence[ClusterAlignment]) -> List[List[AssemblyInput]]:
+    """The backend inputs for one cluster: its '+' pass, then its '-' pass."""
+    alignments = sorted(alignments, key=lambda a: a.lend)
+    return [force_flexorient(alignments, orient) for orient in ("+", "-")]
+
+
 def assemble_cluster(
     alignments: Sequence[ClusterAlignment], backend: AssemblerBackend
 ) -> List[AssembledTranscript]:
     """Assemble one cluster; returns the reported (non-redundant) assemblies."""
     if not alignments:
         return []
+    plus, minus = backend.assemble_many(strand_passes(alignments))
+    return select_assemblies(alignments, plus + minus)
 
-    alignments = sorted(alignments, key=lambda a: a.lend)
 
+def select_assemblies(
+    alignments: Sequence[ClusterAlignment], raw: List[RawAssembly]
+) -> List[AssembledTranscript]:
+    """
+    Choose and annotate the reported assemblies from both strand passes'
+    backend output ('+' pass first), as Perl's assemble_alignments() does.
+    """
     spliced = {a.acc: a.spliced_orient for a in alignments}
     aligned = {a.acc: a.aligned_orient for a in alignments}
     fli = {a.acc: a.is_fli for a in alignments}
     align_ids: Dict[str, List[int]] = {}
-    for a in alignments:
+    for a in sorted(alignments, key=lambda a: a.lend):
         align_ids.setdefault(a.acc, []).append(a.align_id)
-
-    raw: List[RawAssembly] = []
-    for orient in ("+", "-"):
-        raw.extend(backend.assemble(force_flexorient(alignments, orient)))
 
     ranked = list(reversed(sorted(raw, key=lambda r: len(r.accs))))
 

@@ -46,9 +46,11 @@ minimap2-only Perl run exactly at every stage:
 | Subclusters | `subcluster_builder.dbi` + `subcluster_loader.dbi` | `assembly/subclusters.py` | 665 identical subclusters |
 | Outputs | `PASA_transcripts_and_assemblies_to_GFF3.dbi`, `populate_mysql_assembly_*`, `describe_alignment_assemblies_cgi_convert.dbi` | `output.py` | GFF3, FASTA byte-identical; BED, GTF, described.txt identical up to the deviations below |
 
-Speed on the same (heavily loaded) host: everything before assembly takes ~1 s
-(Perl: ~16 min); assembly ~13 s with `--cpu 4` (Perl: ~5 min). Assembly time is
-almost all process start-up for 1,234 `pasa` calls (one per cluster per strand).
+Speed on the same (heavily loaded) host: the whole pipeline takes ~1.5 s
+(Perl: ~21 min to the same point). Assembly takes ~1.6 s with one worker and
+~0.7 s with `--cpu 4`, using `pasa`'s batch mode (`-B`), which assembles many
+strand passes in one process. With a `pasa` built without `-B` it falls back to
+one process per pass (1,234 on the sample data, ~37 s).
 
 ## Running it
 
@@ -56,7 +58,8 @@ Expected layout (scripts use relative paths):
 
 ```
 PASA_port/
-  PASApipeline/   git@github.com:PASApipeline/PASApipeline.git  (cc1f8d7; `make` builds bin/pasa)
+  PASApipeline/   git@github.com:PASApipeline/PASApipeline.git  (cc1f8d7; `make` builds bin/pasa;
+                  batch mode -B is on local branch pasa-batch-mode, not yet pushed)
   PyPASA/         git@github.com:PASApipeline/PyPASA.git
 ```
 
@@ -145,8 +148,8 @@ conda perl with `PERL5LIB` cleared (see the script header).
 
 ## Next steps
 
-1. **Assembly speed:** let `pasa` take many clusters per call (small C++ input
-   change), or use LRAA in batch mode.
+1. **Get `pasa -B` into PASApipeline** (local branch `pasa-batch-mode`), so the
+   fast path is available outside this checkout.
 2. **LRAA backend:** LRAA "PASA mode" is being developed on an LRAA branch
    (`/broad/hptmp/bhaas/PASAPIPELINE_PAPER/LRAA_pasa_mode/`). First evaluation:
    `../LRAA_chaining/REPORT.md` (patched LRAA reached 96% identical assemblies).

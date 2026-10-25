@@ -50,3 +50,12 @@ class AssemblerBackend(ABC):
             All assemblies the backend produces. Every input accession must be
             contained in at least one assembly.
         """
+
+    def assemble_many(self, batches: Sequence[Sequence[AssemblyInput]]) -> List[List[RawAssembly]]:
+        """
+        Assemble many independent strand passes; results are in input order.
+
+        Backends that can do this more cheaply than one assemble() per pass
+        (e.g. one process for all of them) override it.
+        """
+        return [self.assemble(batch) for batch in batches]

@@ -8,6 +8,7 @@ from pypasa.assembly.cluster_assembler import (
     ClusterAlignment,
     assemble_cluster,
     force_flexorient,
+    strand_passes,
 )
 from pypasa.assembly.assembler import remap_transcript_coords
 from pypasa.assembly.pasa_cpp import PasaCppBackend, format_pasa_input, parse_pasa_output
@@ -103,3 +104,22 @@ def test_pasa_cpp_sample_input():
     assert len(out) == 3
     assert {acc for t in out for acc in t.accs} == {a.acc for a in alns}
     assert all(t.spliced_orient == "-" for t in out)
+
+
+@pytest.mark.skipif(not PASA_BIN.exists(), reason="PASApipeline/bin/pasa not built")
+def test_pasa_cpp_batch_matches_single_calls():
+    backend = PasaCppBackend(str(PASA_BIN))
+    if not backend.supports_batch:
+        pytest.skip("pasa built without -B batch mode")
+    passes = []
+    for name in ("pasa_cpp_sample_input", "pasa_cpp_sample_input2", "pasa_cpp_sample_input8"):
+        alns = []
+        for i, line in enumerate((PASA_HOME / "pasa_cpp" / name).read_text().split()):
+            acc, orient, *coords = line.split(",")
+            segs = [tuple(int(x) for x in c.split("-")) for c in coords]
+            alns.append(aln(acc, segs, aligned=orient, spliced=orient, align_id=i))
+        passes.extend(strand_passes(alns))
+    batched = backend.assemble_many(passes)
+    single = [backend.assemble(p) for p in passes]
+    assert [[(r.segments, r.accs) for r in rs] for rs in batched] == \
+        [[(r.segments, r.accs) for r in rs] for rs in single]
