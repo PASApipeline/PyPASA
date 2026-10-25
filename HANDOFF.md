@@ -20,15 +20,15 @@ PASA's results and changes how they're computed.
 2. **In memory, no database.** Stages are plain functions over in-memory
    objects. Persistence is an optional checkpoint file, not the backbone.
 3. **Modular.** Each stage can be run, replaced and compared on its own. The
-   assembler is a pluggable backend (C++ `pasa` now; LRAA in "PASA mode" is
-   being developed as an alternative).
+   assembler is a pluggable backend (C++ `pasa` now; LRAA is under
+   consideration as the assembly step, see "Direction under discussion").
 4. **Fast on today's hardware.** Load inputs once, parallelize where results
    don't depend on order.
 5. **A modern results browser later.** PASA's web portal will be rebuilt from
    scratch on top of the run checkpoint/outputs, not ported.
 
-Open scope question for the PASA author: whether the port goes beyond alignment
-assembly (annotation comparison/updates, alt-splicing analysis, TransDecoder).
+The port is expected to go beyond alignment assembly (annotation comparison and
+updates, alternative splicing, gene models); see "Direction under discussion".
 
 ## Status
 
@@ -146,17 +146,55 @@ conda perl with `PERL5LIB` cleared (see the script header).
   `build_comprehensive_transcriptome.dbi`, TransDecoder, annotation comparison,
   alt-splicing analysis, valid/failed alignment exports.
 
-## Next steps
+## LRAA as the assembler
 
-1. **Get `pasa -B` into PASApipeline** (local branch `pasa-batch-mode`), so the
-   fast path is available outside this checkout.
-2. **LRAA backend:** LRAA "PASA mode" is being developed on an LRAA branch
-   (`/broad/hptmp/bhaas/PASAPIPELINE_PAPER/LRAA_pasa_mode/`). First evaluation:
-   `../LRAA_chaining/REPORT.md` (patched LRAA reached 96% identical assemblies).
-   PyPASA needs an `LRAABackend` with a whole-genome `prepare()` step.
-3. The remaining "not ported" items, in the order the PASA author prioritizes them.
-4. A second dataset (e.g. `custom_alignments.gff3`, or minimap2 + custom combined)
-   to test beyond the sample.
+LRAA (Long Read Alignment Assembler) has been evaluated as a replacement for the
+`pasa` assembly step:
+
+- `../LRAA_chaining/REPORT.md`: stock and patched LRAA chaining (patched reached
+  ~96% identical assemblies; see the LRAA report for a correction to its numbers).
+- `/broad/hptmp/bhaas/PASAPIPELINE_PAPER/LRAA_pasa_mode/REPORT.md`: an LRAA branch
+  (`pasa_mode`, local only) whose `--pasa_mode` runs a port of PASA's chaining
+  inside LRAA, from one whole-genome BAM. It reproduces Perl's 817 assemblies
+  (structures and members) on the sample data, in ~28 s.
+
+## Direction under discussion (paused here, 2026-10-25)
+
+This commit is a checkpoint before a larger refactor, to be planned with the PASA
+author. The idea being considered:
+
+- **LRAA does alignment assembly.** LRAA already covers everything through
+  assembly and also gives a read-to-isoform tracking file and expression values.
+  PyPASA would use it (native chaining or `--pasa_mode`, undecided) instead of
+  porting more of PASA's assembly machinery. The current `pasa` backend stays as
+  the reference implementation and regression fixture.
+- **PyPASA's effort moves downstream:** annotation comparison and updates
+  (`cDNA_annotation_comparer.dbi`, `cDNA_annotation_updater.dbi`), alternative
+  splicing (`classify_alt_splice_isoforms*.dbi`, `report_alt_splicing_findings.dbi`),
+  gene models and the comprehensive transcriptome
+  (`alignment_assembly_to_gene_models.dbi`, `build_comprehensive_transcriptome.dbi`).
+
+Points raised so far:
+
+- Exact parity with Perl's *assemblies* would no longer be a goal if LRAA defines
+  them (unless `--pasa_mode`). Downstream modules should still be verified
+  against Perl first by feeding them the assemblies we already match (the
+  `sample_data/orig_annotations_sample.gff3` annotation gives the ground truth),
+  then switched to LRAA.
+- Downstream modules should read one assembly-set model (assemblies, members with
+  FL status, gene grouping, optional expression) that any assembler fills.
+- PASA's pre-assembly steps (validation, FL marking, polyA sites) don't exist in
+  LRAA as such; keeping PyPASA's as a filter that writes LRAA's BAM is one option.
+- Expression values are meaningful for long reads, less so for Trinity/EST/cDNA
+  inputs; which inputs PyPASA centers on is open.
+- LRAA's gene grouping might replace subclusters.
+
+Other pending items:
+
+1. `pasa -B` batch mode is on PASApipeline local branch `pasa-batch-mode`
+   (cbdd7d2), not pushed.
+2. The "not ported" items above, if still wanted after the refactor plan.
+3. A second dataset (e.g. `custom_alignments.gff3`, or minimap2 + custom combined).
 
 ## Code map
 
