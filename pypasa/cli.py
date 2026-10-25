@@ -8,13 +8,10 @@ PyPASA alignment assembly pipeline.
 import click
 import logging
 import sys
-from pathlib import Path
 
-from pypasa.storage.datastore import DataStore
-from pypasa.alignment.importer import GFF3AlignmentImporter
-from pypasa.alignment.validator import AlignmentValidator
-from pypasa.alignment.clusterer import AlignmentClusterer
-from pypasa.assembly.assembler import PASAAssembler
+from pypasa.assembly.pasa_cpp import PasaCppBackend
+from pypasa.pipeline import PipelineConfig, run_pipeline
+from pypasa.run import PipelineRun
 
 
 def setup_logging(verbose: bool = False):
@@ -41,142 +38,80 @@ def cli(ctx, verbose):
 @click.option('--genome', '-g', required=True, type=click.Path(exists=True),
               help='Genome FASTA file')
 @click.option('--transcripts', '-t', required=True, type=click.Path(exists=True),
-              help='Transcript FASTA file')
-@click.option('--alignments', '-a', required=True, type=click.Path(exists=True),
-              help='Alignments GFF3 file')
-@click.option('--database', '-d', required=True, type=click.Path(),
-              help='SQLite database path')
-@click.option('--output-dir', '-o', default='./pasa_output', type=click.Path(),
-              help='Output directory')
+              help='Transcript FASTA file, as aligned (seqclean output if trimmed)')
+@click.option('--alignments', '-a', required=True, multiple=True, type=click.Path(exists=True),
+              help='Alignments GFF3 file (repeatable)')
+@click.option('--untrimmed-transcripts', '-u', type=click.Path(exists=True),
+              help='Transcripts before seqclean trimming (enables polyA-site analysis with --cln)')
+@click.option('--cln', type=click.Path(exists=True),
+              help="seqclean's .cln report (enables polyA-site analysis with -u)")
+@click.option('--fl-accs', '-f', type=click.Path(exists=True),
+              help='File of full-length cDNA accessions')
 @click.option('--min-percent-id', default=95.0, type=float,
-              help='Minimum percent identity')
+              help='Minimum average percent identity')
 @click.option('--min-percent-aligned', default=75.0, type=float,
-              help='Minimum percent aligned')
-@click.option('--min-overlap-percent', default=0.0, type=float,
-              help='Minimum overlap percent for clustering (0=any overlap)')
-@click.option('--pasa-home', type=click.Path(exists=True),
-              help='PASA installation directory (for C++ assembler)')
-@click.pass_context
+              help='Minimum percent of transcript aligned')
+@click.option('--pasa-bin', type=click.Path(exists=True),
+              help='C++ pasa assembler binary (PASApipeline/bin/pasa); assembly is skipped without it')
+@click.option('--cpu', default=1, type=int,
+              help='Clusters assembled concurrently')
+@click.option('--checkpoint', '-o', type=click.Path(),
+              help='Write the finished run here (gzipped JSON)')
 def align_assemble(
-    ctx,
     genome,
     transcripts,
     alignments,
-    database,
-    output_dir,
+    untrimmed_transcripts,
+    cln,
+    fl_accs,
     min_percent_id,
     min_percent_aligned,
-    min_overlap_percent,
-    pasa_home,
+    pasa_bin,
+    cpu,
+    checkpoint,
 ):
-    """Run complete alignment assembly pipeline."""
-    
+    """Run the alignment assembly pipeline."""
     logger = logging.getLogger(__name__)
-    logger.info("=" * 70)
-    logger.info("PyPASA Alignment Assembly Pipeline")
-    logger.info("=" * 70)
-    
-    # Create output directory
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-    
-    try:
-        # Initialize datastore
-        logger.info(f"Initializing database: {database}")
-        datastore = DataStore(database)
-        
-        # Step 1: Import alignments
-        logger.info("Step 1/4: Importing alignments")
-        importer = GFF3AlignmentImporter(datastore)
-        num_imported = importer.import_gff3(alignments, aligner="gmap")
-        logger.info(f"  Imported {num_imported} alignments")
-        
-        # Step 2: Validate alignments
-        logger.info("Step 2/4: Validating alignments")
-        validator = AlignmentValidator(
-            datastore,
-            min_percent_id=min_percent_id,
-            min_percent_aligned=min_percent_aligned,
-            genome_fasta=genome,
-            transcript_fasta=transcripts,
-        )
-        val_stats = validator.validate_alignments()
-        logger.info(f"  {val_stats['passed']}/{val_stats['total']} alignments passed validation")
-        
-        # Step 3: Cluster alignments
-        # NOTE: Following Perl PASA workflow - cluster ALL valid alignments.
-        # A cDNA can have multiple alignments in different clusters.
-        # No pre-clustering selection is performed (matches Perl PASA's actual behavior).
-        logger.info("Step 3/4: Clustering alignments")
-        logger.info("  (Allowing multiple alignments per cDNA - matching Perl PASA)")
-        clusterer = AlignmentClusterer(
-            datastore,
-            min_overlap_percent=min_overlap_percent,
-        )
-        clust_stats = clusterer.cluster_alignments()
-        logger.info(f"  Created {clust_stats['total_clusters']} clusters")
-        
-        # Step 4: Assemble clusters
-        logger.info("Step 4/4: Assembling clusters")
-        if pasa_home:
-            assembler = PASAAssembler(datastore, pasa_home, genome)
-            asm_stats = assembler.assemble_all_clusters(output_dir=output_dir)
-            logger.info(f"  Generated {asm_stats['assemblies_generated']} assemblies")
-        else:
-            logger.warning("  Skipping assembly: --pasa-home not provided")
-            logger.info("  To run assembly, provide path to PASA installation")
-        
-        # Print reports
-        logger.info("")
-        logger.info("=" * 70)
-        logger.info("PIPELINE COMPLETE")
-        logger.info("=" * 70)
-        print("\n" + validator.get_validation_report())
-        print("\n" + clusterer.get_clustering_report())
-        if pasa_home:
-            print("\n" + assembler.get_assembly_report())
-        
-        # Print database stats
-        stats = datastore.get_stats()
-        print("\n" + "=" * 60)
-        print("DATABASE STATISTICS")
-        print("=" * 60)
-        print(f"Total alignments:    {stats['total_alignments']:>10,}")
-        print(f"Valid alignments:    {stats['valid_alignments']:>10,}")
-        print(f"Clusters:            {stats['clusters']:>10,}")
-        print(f"Assemblies:          {stats['assemblies']:>10,}")
-        print(f"Scaffolds:           {stats['scaffolds']:>10,}")
-        print("=" * 60)
-        
-        datastore.close()
-        
-        logger.info(f"\nOutput saved to: {output_path}")
-        logger.info(f"Database saved to: {database}")
-        
-    except Exception as e:
-        logger.error(f"Pipeline failed: {e}", exc_info=True)
-        sys.exit(1)
+    if bool(untrimmed_transcripts) != bool(cln):
+        sys.exit("--untrimmed-transcripts and --cln go together")
+
+    config = PipelineConfig(
+        genome_fasta=genome,
+        transcripts_fasta=transcripts,
+        alignment_gff3s=list(alignments),
+        fl_accs_file=fl_accs,
+        untrimmed_transcripts_fasta=untrimmed_transcripts,
+        cln_file=cln,
+        min_percent_id=min_percent_id,
+        min_percent_aligned=min_percent_aligned,
+        backend=PasaCppBackend(pasa_bin) if pasa_bin else None,
+        assembly_workers=cpu,
+    )
+    if not pasa_bin:
+        logger.warning("No --pasa-bin given: skipping assembly")
+
+    result = run_pipeline(config)
+    for stage, stats in result.stats.items():
+        print(f"{stage:<12} {result.seconds[stage]:>7.1f}s  {stats}")
+
+    if checkpoint:
+        result.run.save(checkpoint)
+        logger.info(f"Run saved to: {checkpoint}")
 
 
 @cli.command()
-@click.option('--database', '-d', required=True, type=click.Path(exists=True),
-              help='SQLite database path')
-def stats(database):
-    """Show database statistics."""
-    datastore = DataStore(database)
-    stats = datastore.get_stats()
-    
-    print("=" * 60)
-    print("PyPASA DATABASE STATISTICS")
-    print("=" * 60)
-    print(f"Total alignments:    {stats['total_alignments']:>10,}")
-    print(f"Valid alignments:    {stats['valid_alignments']:>10,}")
-    print(f"Clusters:            {stats['clusters']:>10,}")
-    print(f"Assemblies:          {stats['assemblies']:>10,}")
-    print(f"Scaffolds:           {stats['scaffolds']:>10,}")
-    print("=" * 60)
-    
-    datastore.close()
+@click.argument('checkpoint', type=click.Path(exists=True))
+def stats(checkpoint):
+    """Summarize a saved run."""
+    run = PipelineRun.load(checkpoint)
+    valid = [a for a in run.alignments if a.valid]
+    print(f"Completed stages:    {', '.join(run.completed_stages)}")
+    print(f"Total alignments:    {len(run.alignments):>10,}")
+    print(f"Valid alignments:    {len(valid):>10,}")
+    print(f"PolyA sites:         {len(run.polya_sites):>10,}")
+    print(f"Clusters:            {len({a.cluster_id for a in valid if a.cluster_id is not None}):>10,}")
+    print(f"Assemblies:          {len(run.assemblies):>10,}")
+    print(f"Scaffolds:           {len({a.scaffold for a in run.alignments}):>10,}")
 
 
 def main():

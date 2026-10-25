@@ -2,7 +2,7 @@
 GFF3 alignment importer for PyPASA.
 
 This module parses GFF3 format alignment files (from GMAP, BLAT, minimap2)
-and imports them into the DataStore.
+into Alignment objects.
 
 GFF3 Format:
     scaffold  aligner  cDNA_match  start  end  %id  strand  .  ID=align_X;Target=acc start end [strand]
@@ -16,8 +16,7 @@ from pathlib import Path
 from typing import List, Dict, Iterator, Tuple
 from collections import defaultdict
 
-from pypasa.storage.models import Alignment, AlignmentSegment, Orientation
-from pypasa.storage.datastore import DataStore
+from pypasa.models import Alignment, AlignmentSegment, Orientation
 
 logger = logging.getLogger(__name__)
 
@@ -30,26 +29,19 @@ class GFF3AlignmentImporter:
     share the same alignment ID.
     """
     
-    def __init__(self, datastore: DataStore):
-        """
-        Initialize importer.
-        
-        Args:
-            datastore: DataStore for storing alignments
-        """
-        self.datastore = datastore
+    def __init__(self):
+        # align_ids continue across files, in file order (Perl's align_link rowid order)
         self.next_align_id = 1
         
-    def import_gff3(self, gff3_path: str, aligner: str = "gmap") -> int:
+    def import_gff3(self, gff3_path: str) -> List[Alignment]:
         """
         Import alignments from GFF3 file.
         
         Args:
             gff3_path: Path to GFF3 file
-            aligner: Name of aligner (gmap, blat, minimap2)
             
         Returns:
-            Number of alignments imported
+            Alignments in order of first appearance in the file
         """
         logger.info(f"Importing alignments from {gff3_path}")
         
@@ -62,6 +54,7 @@ class GFF3AlignmentImporter:
             try:
                 alignment = Alignment(
                     align_id=self.next_align_id,
+                    align_acc=align_id,
                     cdna_acc=cdna_acc,
                     scaffold=scaffold,
                     segments=segments,
@@ -75,14 +68,12 @@ class GFF3AlignmentImporter:
                 logger.warning(f"Skipping alignment {align_id}: {e}")
                 continue
         
-        # Bulk insert
         if alignments:
-            self.datastore.add_alignments(alignments)
             logger.info(f"Imported {len(alignments)} alignments from {gff3_path}")
         else:
             logger.warning("No valid alignments found in file")
         
-        return len(alignments)
+        return alignments
     
     def _parse_gff3_file(
         self, gff3_path: str

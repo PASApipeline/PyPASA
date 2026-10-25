@@ -2,8 +2,9 @@
 Data models for PyPASA.
 
 These models represent alignments, assemblies, and related structures,
-replacing the database-centric approach of the original Perl implementation
-with Python dataclasses backed by SQLite for persistence.
+replacing the database-centric approach of the original Perl implementation.
+A run is held in memory (pypasa.run.PipelineRun); to_dict()/..._from_dict()
+are used only for optional checkpoint files.
 """
 
 from dataclasses import dataclass, field
@@ -29,7 +30,7 @@ class AlignmentSegment:
     genome_rend: int  # Genomic right end (1-based)
     transcript_lend: int  # Transcript left end (1-based)
     transcript_rend: int  # Transcript right end (1-based)
-    percent_id: float  # Percent identity
+    percent_id: Optional[float] = None  # Percent identity (None for assemblies)
     
     def __post_init__(self) -> None:
         """Validate coordinates."""
@@ -78,6 +79,10 @@ class Alignment:
     
     # Full-length status
     is_fli: bool = False  # Full-length insert
+    
+    # Alignment accession (GFF3 ID; Perl's align_link.align_acc). Unique per
+    # alignment, unlike cdna_acc, and what Perl assembly membership refers to.
+    align_acc: Optional[str] = None
     
     def __post_init__(self) -> None:
         """Calculate derived metrics."""
@@ -163,6 +168,7 @@ class Alignment:
         """Convert to dictionary for JSON serialization."""
         return {
             "align_id": self.align_id,
+            "align_acc": self.align_acc,
             "cdna_acc": self.cdna_acc,
             "scaffold": self.scaffold,
             "segments": [
@@ -203,8 +209,12 @@ class Assembly:
     # Assembly structure
     segments: List[AlignmentSegment]
     
+    # Transcribed orientation from members' splice sites ('?' if unspliced)
+    spliced_orient: Orientation = Orientation.UNKNOWN
+    
     # Component alignments
     component_align_ids: List[int] = field(default_factory=list)
+    component_accs: List[str] = field(default_factory=list)
     
     # Sequence data
     sequence: Optional[str] = None
@@ -257,6 +267,7 @@ class Assembly:
             "lend": self.lend,
             "rend": self.rend,
             "orient": self.orient.value,
+            "spliced_orient": self.spliced_orient.value,
             "segments": [
                 {
                     "genome_lend": s.genome_lend,
@@ -268,6 +279,43 @@ class Assembly:
                 for s in self.segments
             ],
             "component_align_ids": self.component_align_ids,
+            "component_accs": self.component_accs,
             "sequence": self.sequence,
             "is_fli": self.is_fli,
         }
+
+
+def alignment_from_dict(d: dict) -> Alignment:
+    """Inverse of Alignment.to_dict()."""
+    return Alignment(
+        align_id=d["align_id"],
+        align_acc=d.get("align_acc"),
+        cdna_acc=d["cdna_acc"],
+        scaffold=d["scaffold"],
+        segments=[AlignmentSegment(**s) for s in d["segments"]],
+        orient=Orientation(d["orient"]),
+        spliced_orient=Orientation(d["spliced_orient"]) if d.get("spliced_orient") else None,
+        valid=d["valid"],
+        cluster_id=d.get("cluster_id"),
+        avg_percent_id=d.get("avg_percent_id"),
+        percent_aligned=d.get("percent_aligned"),
+        is_fli=d.get("is_fli", False),
+    )
+
+
+def assembly_from_dict(d: dict) -> Assembly:
+    """Inverse of Assembly.to_dict()."""
+    return Assembly(
+        assembly_id=d["assembly_id"],
+        cluster_id=d["cluster_id"],
+        scaffold=d["scaffold"],
+        lend=d["lend"],
+        rend=d["rend"],
+        orient=Orientation(d["orient"]),
+        spliced_orient=Orientation(d.get("spliced_orient", "?")),
+        segments=[AlignmentSegment(**s) for s in d["segments"]],
+        component_align_ids=d.get("component_align_ids", []),
+        component_accs=d.get("component_accs", []),
+        sequence=d.get("sequence"),
+        is_fli=d.get("is_fli", False),
+    )

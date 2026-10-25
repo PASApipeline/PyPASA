@@ -1,63 +1,52 @@
 """
 Alignment validator for PyPASA.
 
-This module validates imported alignments based on quality criteria:
-- Minimum percent identity
-- Minimum alignment length
-- Minimum percent of transcript aligned
-- Perfect splice boundaries (optional)
+Port of validate_alignments_in_db.dbi plus the structural checks Perl runs
+when it builds each alignment object (CDNA_alignment.pm). An alignment is
+valid if it:
+- is contiguous on the transcript,
+- has consensus splice sites at every intron in one orientation (which also
+  sets its spliced orientation),
+- meets the minimum average percent identity,
+- covers the minimum percent of the transcript's length.
 
-Corresponds to validate_alignments_in_db.dbi in Perl PASA.
+Alignments are updated in place (valid, spliced_orient, percent_aligned).
 """
 
 import logging
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional
 
-from pypasa.storage.models import Alignment, Orientation
-from pypasa.storage.datastore import DataStore
+from pypasa.models import Alignment, Orientation
 
 logger = logging.getLogger(__name__)
 
 
 class AlignmentValidator:
-    """
-    Validate transcript alignments based on quality criteria.
-    
-    Quality filters:
-    - min_percent_id: Minimum average percent identity (default 95.0)
-    - min_percent_aligned: Minimum % of transcript aligned (default 75.0)
-    - min_avg_per_id: Alternative min percent identity threshold
-    - require_perfect_splice: Require perfect dinucleotide splice boundaries
-    """
+    """Validate transcript alignments against Perl PASA's criteria."""
     
     def __init__(
         self,
-        datastore: DataStore,
+        genome: Dict[str, str],
+        transcript_lengths: Dict[str, int],
         min_percent_id: float = 95.0,
         min_percent_aligned: float = 75.0,
         num_bp_perfect_splice: int = 0,
-        genome_fasta: str = None,
-        transcript_fasta: str = None,
     ):
         """
-        Initialize validator.
-        
         Args:
-            datastore: DataStore for querying/updating alignments
+            genome: scaffold -> sequence (for splice sites)
+            transcript_lengths: transcript accession -> length (for percent aligned)
             min_percent_id: Minimum average percent identity
             min_percent_aligned: Minimum percent of transcript aligned
-            num_bp_perfect_splice: Number of bp required for perfect splice boundary (0=disabled)
-            genome_fasta: Path to genome FASTA file (for splice site detection)
-            transcript_fasta: Path to transcript FASTA file (for calculating percent_aligned)
+            num_bp_perfect_splice: Perl's NUM_BP_PERFECT_SPLICE_BOUNDARY; only 0 is
+                supported so far
         """
-        self.datastore = datastore
+        if num_bp_perfect_splice:
+            raise NotImplementedError("NUM_BP_PERFECT_SPLICE_BOUNDARY > 0 is not ported yet")
+        self.genome = genome
+        self.transcript_lengths = transcript_lengths
         self.min_percent_id = min_percent_id
         self.min_percent_aligned = min_percent_aligned
-        self.num_bp_perfect_splice = num_bp_perfect_splice
-        self.genome_fasta = genome_fasta
-        self.transcript_fasta = transcript_fasta
-        self._genome_seqs = {}  # Cache for genome sequences
-        self._transcript_lengths = {}  # Cache for transcript lengths
         
         self.stats = {
             'total': 0,
@@ -65,101 +54,58 @@ class AlignmentValidator:
             'failed_percent_id': 0,
             'failed_percent_aligned': 0,
             'failed_splice': 0,
+            'failed_contiguity': 0,
         }
     
-    def validate_alignments(self, scaffold: str = None) -> Dict[str, int]:
+    def validate(self, alignments: List[Alignment]) -> Dict[str, int]:
         """
-        Validate alignments and mark them as valid/invalid.
-        
-        Args:
-            scaffold: If provided, only validate alignments on this scaffold.
-                     If None, validate all scaffolds.
+        Validate alignments in place.
         
         Returns:
             Dictionary of validation statistics
         """
-        if scaffold:
-            scaffolds = [scaffold]
-        else:
-            scaffolds = self.datastore.get_scaffolds()
-        
-        logger.info(f"Validating alignments on {len(scaffolds)} scaffold(s)")
-        
-        for scaffold in scaffolds:
-            self._validate_scaffold(scaffold)
+        for alignment in alignments:
+            self._validate_one(alignment)
         
         logger.info(
-            f"Validation complete: {self.stats['passed']}/{self.stats['total']} passed "
-            f"({100.0 * self.stats['passed'] / self.stats['total']:.1f}%)"
+            f"Validation complete: {self.stats['passed']}/{self.stats['total']} passed"
         )
-        
         return self.stats
     
-    def _validate_scaffold(self, scaffold: str) -> None:
-        """
-        Validate all alignments on a single scaffold.
+    def _validate_one(self, alignment: Alignment) -> None:
+        self.stats['total'] += 1
+        genome_seq = self.genome[alignment.scaffold]
         
-        Args:
-            scaffold: Scaffold name
-        """
-        # Load alignments for this scaffold
-        alignments = self.datastore.get_alignments_by_scaffold(scaffold, valid_only=False)
-        
-        if not alignments:
-            return
-        
-        logger.debug(f"Validating {len(alignments)} alignments on {scaffold}")
-        
-        validity_updates = {}
-        spliced_orient_updates = {}
-        percent_aligned_updates = {}
-        
-        # Load genome sequence if needed for splice detection
-        genome_seq = None
-        if self.genome_fasta:
-            genome_seq = self._get_genome_sequence(scaffold)
-        
-        for alignment in alignments:
-            self.stats['total'] += 1
-            
-            # Detect transcribed orientation from splice sites
-            if genome_seq and len(alignment.segments) > 1:
-                spliced_orient = self._detect_spliced_orientation(alignment, genome_seq)
-                if spliced_orient:
-                    spliced_orient_updates[alignment.align_id] = spliced_orient
-            
-            # Validate alignment
-            is_valid, reason = self._validate_alignment(alignment)
-            
-            validity_updates[alignment.align_id] = is_valid
-            
-            # Store percent_aligned if calculated
-            if alignment.percent_aligned is not None:
-                percent_aligned_updates[alignment.align_id] = alignment.percent_aligned
-            
-            if is_valid:
-                self.stats['passed'] += 1
+        # Structural checks Perl runs when building the alignment object
+        # (CDNA_alignment.pm); either one invalidates the alignment.
+        structural_errors = []
+        if not self._is_contiguous(alignment):
+            structural_errors.append("incontiguous alignment")
+        if len(alignment.segments) > 1:
+            spliced_orient = self._identify_splice_junctions(alignment, genome_seq)
+            if spliced_orient:
+                alignment.spliced_orient = spliced_orient
             else:
-                # Track failure reason
-                if 'percent_id' in reason:
-                    self.stats['failed_percent_id'] += 1
-                elif 'aligned' in reason:
-                    self.stats['failed_percent_aligned'] += 1
-                elif 'splice' in reason:
-                    self.stats['failed_splice'] += 1
-                
-                logger.debug(
-                    f"Alignment {alignment.cdna_acc} on {scaffold} failed: {reason}"
-                )
+                structural_errors.append("splice site validations failed")
         
-        # Bulk update validity, spliced orientation, and percent_aligned in database
-        if validity_updates:
-            self.datastore.update_alignment_validity(validity_updates)
-        if spliced_orient_updates:
-            self.datastore.update_spliced_orientations(spliced_orient_updates)
-        if percent_aligned_updates:
-            self.datastore.update_percent_aligned(percent_aligned_updates)
-    
+        is_valid, reason = self._validate_alignment(alignment)
+        if structural_errors:
+            is_valid, reason = False, "; ".join(structural_errors)
+        alignment.valid = is_valid
+        
+        if is_valid:
+            self.stats['passed'] += 1
+        else:
+            if 'percent_id' in reason:
+                self.stats['failed_percent_id'] += 1
+            elif 'aligned' in reason:
+                self.stats['failed_percent_aligned'] += 1
+            elif 'splice' in reason:
+                self.stats['failed_splice'] += 1
+            elif 'incontiguous' in reason:
+                self.stats['failed_contiguity'] += 1
+            logger.debug(f"Alignment {alignment.align_acc} failed: {reason}")
+
     def _validate_alignment(self, alignment: Alignment) -> tuple:
         """
         Check if a single alignment passes quality filters.
@@ -193,68 +139,14 @@ class AlignmentValidator:
                     f"percent_aligned {percent_aligned:.2f} < {self.min_percent_aligned}",
                 )
         
-        # TODO: Check splice boundaries if required
-        # This would require genome sequence access
-        if self.num_bp_perfect_splice > 0:
-            # Placeholder - would need genome sequence
-            pass
-        
         return (True, "passed")
     
     def _get_transcript_length(self, cdna_acc: str) -> int:
-        """
-        Get the FULL length of a transcript from the FASTA file.
-        
-        This is critical for correct percent_aligned calculation.
-        The max aligned position does NOT equal the transcript length!
-        
-        Args:
-            cdna_acc: Transcript accession
-            
-        Returns:
-            Full transcript length in bases, or 0 if not found
-        """
-        # Check cache first
-        if cdna_acc in self._transcript_lengths:
-            return self._transcript_lengths[cdna_acc]
-        
-        # Load from FASTA file
-        if not self.transcript_fasta:
-            logger.warning(
-                f"No transcript FASTA provided - cannot calculate percent_aligned for {cdna_acc}"
-            )
-            return 0
-        
-        try:
-            with open(self.transcript_fasta, 'r') as f:
-                in_target = False
-                seq_length = 0
-                
-                for line in f:
-                    line = line.strip()
-                    if line.startswith('>'):
-                        # Check if we found our sequence
-                        if in_target:
-                            self._transcript_lengths[cdna_acc] = seq_length
-                            return seq_length
-                        
-                        # Check if this header matches our accession
-                        header = line[1:].split()[0]
-                        if cdna_acc in header or header in cdna_acc:
-                            in_target = True
-                            seq_length = 0
-                    elif in_target:
-                        seq_length += len(line)
-                
-                # Check last sequence
-                if in_target:
-                    self._transcript_lengths[cdna_acc] = seq_length
-                    return seq_length
-        except Exception as e:
-            logger.warning(f"Could not load transcript length for {cdna_acc}: {e}")
-        
-        logger.warning(f"Transcript {cdna_acc} not found in {self.transcript_fasta}")
-        return 0
+        """Full transcript length, or 0 (with a warning) if the accession is unknown."""
+        length = self.transcript_lengths.get(cdna_acc, 0)
+        if not length:
+            logger.warning(f"Transcript {cdna_acc} not found among transcript lengths")
+        return length
     
     def get_validation_report(self) -> str:
         """
@@ -279,99 +171,62 @@ class AlignmentValidator:
         report.append(f"  Low percent identity:    {self.stats['failed_percent_id']:>10,}")
         report.append(f"  Low percent aligned:     {self.stats['failed_percent_aligned']:>10,}")
         report.append(f"  Splice boundary issues:  {self.stats['failed_splice']:>10,}")
+        report.append(f"  Incontiguous:            {self.stats['failed_contiguity']:>10,}")
         report.append("=" * 60)
         
         return "\n".join(report)
+
+    # Consensus (donor, acceptor) dinucleotides on the genome's + strand, per
+    # transcribed orientation. AT-AC is allowed, as in Perl's default
+    # ($ALLOW_ATAC_splice_pairs=1, extended AT-AC donor check off).
+    CONSENSUS_SPLICE_PAIRS = {
+        Orientation.PLUS: {("GT", "AG"), ("GC", "AG"), ("AT", "AC")},
+        Orientation.MINUS: {("CT", "AC"), ("CT", "GC"), ("GT", "AT")},
+    }
     
-    def _get_genome_sequence(self, scaffold: str) -> str:
+    def _identify_splice_junctions(self, alignment: Alignment, genome_seq: str) -> Optional[Orientation]:
         """
-        Load genome sequence for a scaffold.
+        Determine transcribed orientation from splice sites.
         
-        Args:
-            scaffold: Scaffold name
-            
+        Port of CDNA_alignment::identify_splice_junctions: try the aligned
+        orientation, then the opposite; the first in which every intron has a
+        consensus splice pair is the spliced orientation.
+        
         Returns:
-            Genome sequence as string
+            Orientation.PLUS or Orientation.MINUS, or None if neither
+            orientation validates (Perl: "Splice site validations failed")
         """
-        if scaffold in self._genome_seqs:
-            return self._genome_seqs[scaffold]
+        aligned = Orientation(alignment.orient)
+        if aligned == Orientation.UNKNOWN:
+            aligned = Orientation.PLUS
+        opposite = Orientation.MINUS if aligned == Orientation.PLUS else Orientation.PLUS
         
-        if not self.genome_fasta:
-            return None
+        pairs = []
+        for prev, curr in zip(alignment.segments, alignment.segments[1:]):
+            donor = genome_seq[prev.genome_rend:prev.genome_rend + 2].upper()
+            acceptor = genome_seq[curr.genome_lend - 3:curr.genome_lend - 1].upper()
+            pairs.append((donor, acceptor))
         
-        # Simple FASTA parser
-        try:
-            with open(self.genome_fasta, 'r') as f:
-                current_scaffold = None
-                seq_lines = []
-                
-                for line in f:
-                    line = line.strip()
-                    if line.startswith('>'):
-                        # Save previous scaffold
-                        if current_scaffold == scaffold and seq_lines:
-                            self._genome_seqs[scaffold] = ''.join(seq_lines)
-                            return self._genome_seqs[scaffold]
-                        
-                        # Start new scaffold
-                        current_scaffold = line[1:].split()[0]
-                        seq_lines = []
-                    elif current_scaffold == scaffold:
-                        seq_lines.append(line)
-                
-                # Check last scaffold
-                if current_scaffold == scaffold and seq_lines:
-                    self._genome_seqs[scaffold] = ''.join(seq_lines)
-                    return self._genome_seqs[scaffold]
-        except Exception as e:
-            logger.warning(f"Could not load genome sequence for {scaffold}: {e}")
-        
+        for orient in (aligned, opposite):
+            if all(pair in self.CONSENSUS_SPLICE_PAIRS[orient] for pair in pairs):
+                return orient
         return None
     
-    def _detect_spliced_orientation(self, alignment: Alignment, genome_seq: str) -> Optional[Orientation]:
+    @staticmethod
+    def _is_contiguous(alignment: Alignment) -> bool:
         """
-        Detect transcribed orientation from splice dinucleotides.
+        Check that consecutive segments are adjacent on the transcript.
         
-        Checks intron boundaries for canonical splice sites:
-        - GT-AG or GC-AG = forward (+) transcription
-        - CT-AC or CT-GC = reverse (-) transcription
-        
-        Args:
-            alignment: Alignment with multiple segments (introns)
-            genome_seq: Genome sequence
-            
-        Returns:
-            Orientation.PLUS, Orientation.MINUS, or None if ambiguous
+        Port of CDNA_alignment::verify_contiguity, using the aligned
+        orientation: on '+' each segment starts 1 after the previous one ends
+        in transcript coords; on '-' (segments still in genome order) each
+        ends 1 before the previous one starts.
         """
-        if len(alignment.segments) < 2:
-            return None  # No introns
-        
-        plus_votes = 0
-        minus_votes = 0
-        
-        # Check each intron
-        for i in range(len(alignment.segments) - 1):
-            donor_end = alignment.segments[i].genome_rend
-            acceptor_start = alignment.segments[i + 1].genome_lend
-            
-            # Extract splice dinucleotides (1-based to 0-based)
-            try:
-                donor = genome_seq[donor_end:donor_end + 2].upper()
-                acceptor = genome_seq[acceptor_start - 3:acceptor_start - 1].upper()
-                
-                # Check for forward strand signals (GT-AG, GC-AG)
-                if donor in ['GT', 'GC'] and acceptor == 'AG':
-                    plus_votes += 1
-                # Check for reverse strand signals (CT-AC, CT-GC)
-                elif donor == 'CT' and acceptor in ['AC', 'GC']:
-                    minus_votes += 1
-            except IndexError:
-                continue
-        
-        # Determine orientation based on votes
-        if plus_votes > 0 and minus_votes == 0:
-            return Orientation.PLUS
-        elif minus_votes > 0 and plus_votes == 0:
-            return Orientation.MINUS
-        else:
-            return None  # Ambiguous or no clear signal
+        minus = Orientation(alignment.orient) == Orientation.MINUS
+        for prev, curr in zip(alignment.segments, alignment.segments[1:]):
+            if minus:
+                if curr.transcript_rend != prev.transcript_lend - 1:
+                    return False
+            elif curr.transcript_lend != prev.transcript_rend + 1:
+                return False
+        return True

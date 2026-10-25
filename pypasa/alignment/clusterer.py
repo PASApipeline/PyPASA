@@ -26,8 +26,7 @@ import logging
 from typing import List, Dict, Set, Tuple
 from collections import defaultdict
 
-from pypasa.storage.models import Alignment, Orientation
-from pypasa.storage.datastore import DataStore
+from pypasa.models import Alignment, Orientation
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +47,6 @@ class AlignmentClusterer:
     
     def __init__(
         self,
-        datastore: DataStore,
         min_overlap_percent: float = 0.0,
         respect_strand: bool = False,
     ):
@@ -56,7 +54,6 @@ class AlignmentClusterer:
         Initialize clusterer.
         
         Args:
-            datastore: DataStore for querying/updating alignments
             min_overlap_percent: Minimum percentage overlap for clustering (0-100)
                                 If 0, any overlap triggers clustering (default mode)
                                 Currently not used - reserved for future stringent mode
@@ -65,7 +62,6 @@ class AlignmentClusterer:
                            If True, strand-specific clustering - matches Perl's stringent mode
                            (assign_clusters_by_stringent_alignment_overlap.dbi).
         """
-        self.datastore = datastore
         self.min_overlap_percent = min_overlap_percent
         self.respect_strand = respect_strand
         
@@ -78,28 +74,26 @@ class AlignmentClusterer:
             'multi_alignment_clusters': 0,
         }
     
-    def cluster_alignments(self, scaffold: str = None) -> Dict[str, int]:
+    def cluster_alignments(self, alignments: List[Alignment]) -> Dict[str, int]:
         """
-        Cluster alignments by overlap.
+        Cluster valid alignments by overlap, setting cluster_id in place.
         
-        Args:
-            scaffold: If provided, only cluster alignments on this scaffold.
-                     If None, cluster all scaffolds.
+        Cluster ids are assigned in (scaffold name, position) order.
         
         Returns:
             Dictionary of clustering statistics
         """
-        if scaffold:
-            scaffolds = [scaffold]
-        else:
-            scaffolds = self.datastore.get_scaffolds()
+        by_scaffold: Dict[str, List[Alignment]] = defaultdict(list)
+        for aln in alignments:
+            if aln.valid:
+                by_scaffold[aln.scaffold].append(aln)
         
-        logger.info(f"Clustering alignments on {len(scaffolds)} scaffold(s)")
+        logger.info(f"Clustering alignments on {len(by_scaffold)} scaffold(s)")
         
         # Treat each scaffold independently (matching Perl PASA clustering behavior)
         # Note: gi|XXX and gi|revXXX are kept separate during clustering
-        for scaffold in scaffolds:
-            self._cluster_scaffold(scaffold)
+        for scaffold in sorted(by_scaffold):
+            self._cluster_scaffold(by_scaffold[scaffold])
         
         logger.info(
             f"Clustering complete: {self.stats['clustered_alignments']} alignments "
@@ -108,23 +102,13 @@ class AlignmentClusterer:
         
         return self.stats
     
-    def _cluster_scaffold(self, scaffold: str) -> None:
+    def _cluster_scaffold(self, all_alignments: List[Alignment]) -> None:
         """
-        Cluster all valid alignments on a single scaffold.
+        Cluster the valid alignments of one scaffold.
         
         Uses expanding window algorithm (Perl's Overlap_piler.pm) to create
         maximal overlap piles.
-        
-        Args:
-            scaffold: Scaffold name (treated as distinct - gi|XXX and gi|revXXX are separate)
         """
-        # Load alignments from this scaffold only
-        all_alignments = self.datastore.get_alignments_by_scaffold(scaffold, valid_only=True)
-        
-        if not all_alignments:
-            return
-        
-        logger.debug(f"Clustering {len(all_alignments)} alignments on {scaffold}")
         
         self.stats['total_alignments'] += len(all_alignments)
         
@@ -175,13 +159,8 @@ class AlignmentClusterer:
         
         self.stats['clustered_alignments'] += len(cluster_assignments)
         
-        # Bulk update cluster assignments in database
-        if cluster_assignments:
-            self.datastore.update_alignment_clusters(cluster_assignments)
-            logger.debug(
-                f"Assigned {len(cluster_assignments)} alignments to "
-                f"{len(set(cluster_assignments.values()))} clusters"
-            )
+        for aln in all_alignments:
+            aln.cluster_id = cluster_assignments[aln.align_id]
     
     def _expanding_window_cluster(self, alignments: List[Alignment]) -> List[List[int]]:
         """
