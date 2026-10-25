@@ -10,6 +10,8 @@ import logging
 import sys
 
 from pypasa.assembly.pasa_cpp import PasaCppBackend
+from pypasa.fasta import read_fasta
+from pypasa.output import write_all
 from pypasa.pipeline import PipelineConfig, run_pipeline
 from pypasa.run import PipelineRun
 
@@ -57,6 +59,8 @@ def cli(ctx, verbose):
               help='Clusters assembled concurrently')
 @click.option('--checkpoint', '-o', type=click.Path(),
               help='Write the finished run here (gzipped JSON)')
+@click.option('--out-prefix', type=click.Path(),
+              help='Write assembly GFF3/GTF/BED/FASTA/described files as <prefix>.<suffix>')
 def align_assemble(
     genome,
     transcripts,
@@ -69,6 +73,7 @@ def align_assemble(
     pasa_bin,
     cpu,
     checkpoint,
+    out_prefix,
 ):
     """Run the alignment assembly pipeline."""
     logger = logging.getLogger(__name__)
@@ -97,6 +102,10 @@ def align_assemble(
     if checkpoint:
         result.run.save(checkpoint)
         logger.info(f"Run saved to: {checkpoint}")
+    if out_prefix and result.run.assemblies:
+        run_name = out_prefix.rstrip("/").split("/")[-1]
+        for path in write_all(result.run, out_prefix, run_name, read_fasta(genome)):
+            logger.info(f"Wrote {path}")
 
 
 @cli.command()

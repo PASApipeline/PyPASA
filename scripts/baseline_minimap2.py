@@ -24,6 +24,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from pypasa.assembly.pasa_cpp import PasaCppBackend
+from pypasa.fasta import read_fasta
+from pypasa.output import write_all
 from pypasa.pipeline import PipelineConfig, run_pipeline
 
 logging.basicConfig(level=logging.WARNING)
@@ -34,6 +36,9 @@ def main():
     ap.add_argument("checkpoint", nargs="?", help="write the run here (gzipped JSON)")
     ap.add_argument("--no-assembly", action="store_true")
     ap.add_argument("--cpu", type=int, default=4, help="clusters assembled concurrently")
+    ap.add_argument("--out-prefix", help="write assembly output files as <prefix>.<suffix> "
+                    "(use a basename of mm2only_pasa.sqlite to compare with "
+                    "compare_outputs_with_perl.py)")
     args = ap.parse_args()
 
     pasa_home = Path(__file__).resolve().parents[2] / "PASApipeline"
@@ -62,6 +67,8 @@ def main():
     print("seconds: " + ", ".join(f"{k} {v:.1f}" for k, v in result.seconds.items()))
     if args.checkpoint:
         run.save(args.checkpoint)
+    if args.out_prefix and run.assemblies:
+        write_all(run, args.out_prefix, Path(args.out_prefix).name, read_fasta(config.genome_fasta))
 
 
 if __name__ == "__main__":
