@@ -8,6 +8,7 @@ Stages, in Perl PASA's order (Launch_PASA_pipeline.pl):
   polya        polyA_site_transcript_mapper.dbi (when polyA-trimmed, Perl: -T -u)
   clustering   reassign_clusters_via_valid_align_coords.dbi
   assembly     assemble_clusters.dbi + assembly_db_loader.dbi
+  subclusters  subcluster_builder.dbi + subcluster_loader.dbi
 
 Each stage reads and updates the PipelineRun. Sequence files are loaded once
 and shared across stages.
@@ -24,6 +25,7 @@ from pypasa.alignment.polya import PolyASiteMapper, parse_cln
 from pypasa.alignment.validator import AlignmentValidator
 from pypasa.assembly.assembler import PASAAssembler
 from pypasa.assembly.backend import AssemblerBackend
+from pypasa.assembly.subclusters import build_subclusters
 from pypasa.fasta import read_fasta, read_fasta_lengths
 from pypasa.run import PipelineRun
 
@@ -109,5 +111,10 @@ def run_pipeline(config: PipelineConfig) -> PipelineResult:
             run.assemblies = assembler.assemble_all_clusters(run.alignments)
             return assembler.stats
         stage("assembly", do_assembly)
+
+        def do_subclusters():
+            run.subclusters = build_subclusters(run.assemblies)
+            return {"subclusters": len(run.subclusters)}
+        stage("subclusters", do_subclusters)
 
     return result

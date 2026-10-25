@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Dict, List
 
 from pypasa.alignment.polya import PolyASite
+from pypasa.assembly.subclusters import Subcluster
 from pypasa.models import Alignment, Assembly, alignment_from_dict, assembly_from_dict
 
 CHECKPOINT_VERSION = 1
@@ -23,6 +24,7 @@ class PipelineRun:
     alignments: List[Alignment] = field(default_factory=list)
     polya_sites: List[PolyASite] = field(default_factory=list)
     assemblies: List[Assembly] = field(default_factory=list)
+    subclusters: List[Subcluster] = field(default_factory=list)
     completed_stages: List[str] = field(default_factory=list)
 
     def valid_alignments_by_scaffold(self) -> Dict[str, List[Alignment]]:
@@ -40,6 +42,7 @@ class PipelineRun:
             "alignments": [a.to_dict() for a in self.alignments],
             "polya_sites": [asdict(p) for p in self.polya_sites],
             "assemblies": [a.to_dict() for a in self.assemblies],
+            "subclusters": [asdict(s) for s in self.subclusters],
         }
         with gzip.open(path, "wt") as fh:
             json.dump(payload, fh)
@@ -54,5 +57,6 @@ class PipelineRun:
             alignments=[alignment_from_dict(d) for d in payload["alignments"]],
             polya_sites=[PolyASite(**d) for d in payload["polya_sites"]],
             assemblies=[assembly_from_dict(d) for d in payload["assemblies"]],
+            subclusters=[Subcluster(**d) for d in payload.get("subclusters", [])],
             completed_stages=payload["completed_stages"],
         )

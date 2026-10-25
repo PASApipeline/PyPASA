@@ -67,7 +67,10 @@ def load_perl(path, prog):
         """SELECT al.align_acc, p.genomicCoord, p.transcribedOrient, p.trimType, p.alignEndOffset
            FROM transcriptPolyA p JOIN align_link al ON al.align_id = p.align_id"""
     ))
-    return aligns, asmbls, polya
+    subclusters = defaultdict(set)
+    for sid, acc in c.execute("SELECT subcluster_id, cdna_acc FROM subcluster_link"):
+        subclusters[sid].add(acc)
+    return aligns, asmbls, polya, list(subclusters.values())
 
 
 def load_pypasa(path):
@@ -90,7 +93,8 @@ def load_pypasa(path):
         (by_id[p.align_id], p.genomic_coord, p.transcribed_orient, p.trim_type, p.align_end_offset)
         for p in run.polya_sites
     }
-    return aligns, asmbls, polya
+    subclusters = [{f"asmbl_{i}" for i in s.assembly_ids} for s in run.subclusters]
+    return aligns, asmbls, polya, subclusters
 
 
 def section(title):
@@ -106,8 +110,8 @@ def main():
     args = ap.parse_args()
     n_ex = args.examples
 
-    perl_al, perl_asm, perl_polya = load_perl(args.perl_db, args.prog)
-    py_al, py_asm, py_polya = load_pypasa(args.pypasa_checkpoint)
+    perl_al, perl_asm, perl_polya, perl_sub = load_perl(args.perl_db, args.prog)
+    py_al, py_asm, py_polya, py_sub = load_pypasa(args.pypasa_checkpoint)
     if None in py_al:
         raise SystemExit("PyPASA run has no align_acc values; re-import with the current importer")
 
@@ -180,6 +184,15 @@ def main():
             x = by[k][0]
             print(f"  {label} {x['name']} {x['contig']} {x['orient']} "
                   f"{','.join(f'{a}-{b}' for a, b in x['segs'])}")
+
+
+    section("subclusters")
+    # compare as sets of assembly structures; assembly names differ between runs
+    p_key = {x["name"]: key(x) for x in perl_asm}
+    q_key = {x["name"]: key(x) for x in py_asm}
+    ps = Counter(frozenset(p_key[a] for a in sub) for sub in perl_sub)
+    qs = Counter(frozenset(q_key[a] for a in sub) for sub in py_sub)
+    print(f"perl {sum(ps.values())}  pypasa {sum(qs.values())}  identical {sum((ps & qs).values())}")
 
 
 if __name__ == "__main__":

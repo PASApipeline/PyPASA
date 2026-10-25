@@ -8,10 +8,11 @@ This is the canonical regression check referenced in HANDOFF.md. It expects
 PASApipeline to be checked out next to PyPASA, with minimap2.spliced_alignments.gff3
 and genome_sample.fasta in sample_data (untracked run products; see HANDOFF.md).
 
-Expected (as of 2026-10-25): imported 14490, valid 12251, clusters 617, assemblies 817.
+Expected (as of 2026-10-25): imported 14490, valid 12251, clusters 617, assemblies 817,
+subclusters 665.
 That matches a minimap2-only Perl run (no custom_alignments.gff3) alignment for
 alignment: validation, spliced orientation, polyA sites (476), cluster membership
-and assemblies. Save a checkpoint and run scripts/compare_with_perl_db.py on it
+assemblies and subclusters. Save a checkpoint and run scripts/compare_with_perl_db.py on it
 to check.
 """
 
